@@ -3,6 +3,9 @@ import express from 'express';
 import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
+import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import mammoth from 'mammoth';
 import ExcelJS from 'exceljs';
@@ -725,7 +728,12 @@ app.post('/generate-manual', async (req, res) => {
 app.post('/generate-scenarios', async (req, res) => {
   try {
     const scenarios = (req.body.scenarios || '').trim();
-    if (!scenarios) return res.status(400).json({ message: 'Please enter at least one scenario.' });
+    const project = (req.body.project || '').trim();
+    const environment = (req.body.environment || '').trim();
+    const target = (req.body.target || '').trim();
+    if (!scenarios) return res.status(400).json({ message: 'Please enter at least one test step.' });
+    if (!project) return res.status(400).json({ message: 'Please select a project.' });
+    if (!environment) return res.status(400).json({ message: 'Please select an environment.' });
 
     const { cases, requirements } = await generateTestCases(scenarios, '');
     if (!cases.length) return res.status(422).json({ message: 'No test cases were generated. Add more detail to your scenarios.' });
@@ -748,6 +756,94 @@ app.post('/generate-scenarios', async (req, res) => {
   } catch (err) {
     console.error(err);
     if (!res.headersSent) res.status(500).json({ message: err.message || 'Generation failed.' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Recorder Studio — records real browser actions via Playwright codegen and
+// hands back the generated automation script.
+// ---------------------------------------------------------------------------
+const RECORDER_TARGETS = {
+  'pw-test': { label: 'Playwright Test (JavaScript)', ext: 'spec.js', flag: null },
+  javascript: { label: 'Playwright Library (JavaScript)', ext: 'js', flag: 'javascript' },
+  python: { label: 'Playwright (Python, sync)', ext: 'py', flag: 'python' },
+  'python-async': { label: 'Playwright (Python, async)', ext: 'py', flag: 'python-async' },
+  'python-pytest': { label: 'Pytest (Python)', ext: 'py', flag: 'python-pytest' },
+  java: { label: 'Playwright (Java)', ext: 'java', flag: 'java' },
+  csharp: { label: 'Playwright (C#)', ext: 'cs', flag: 'csharp' },
+  'csharp-nunit': { label: 'C# NUnit', ext: 'cs', flag: 'csharp-nunit' },
+  'csharp-mstest': { label: 'C# MSTest', ext: 'cs', flag: 'csharp-mstest' },
+};
+
+function recordCodegen(url, targetKey, res) {
+  const target = RECORDER_TARGETS[targetKey];
+  const outFile = path.join(os.tmpdir(), `tcg-recorder-${crypto.randomUUID()}.${target.ext}`);
+  const args = ['playwright', 'codegen', url, '--output', outFile];
+  if (target.flag) args.push('--target', target.flag);
+  const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+
+  console.log('[recorder] spawning:', npxCmd, JSON.stringify(args));
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawn(npxCmd, args, { stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' });
+    } catch (err) {
+      return reject(new Error(`Could not launch the recorder: ${err.message}`));
+    }
+    let stderr = '';
+    let stdout = '';
+    let spawnErr = null;
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.on('error', (err) => { spawnErr = err; });
+    const onAbort = () => {
+      console.log('[recorder] res close fired. writableEnded=', res.writableEnded, 'killed=', child.killed);
+      if (!res.writableEnded && !child.killed) child.kill();
+    };
+    res.on('close', onAbort);
+    child.on('close', (code) => {
+      console.log('[recorder] closed. code=', code, 'stdout=', JSON.stringify(stdout), 'stderr=', JSON.stringify(stderr));
+      res.off('close', onAbort);
+      if (spawnErr) {
+        return reject(new Error(`Could not launch the recorder: ${spawnErr.message}`));
+      }
+      if (!fs.existsSync(outFile)) {
+        const needsSetup = /executable doesn't exist|playwright install/i.test(stderr);
+        const hint = needsSetup
+          ? 'Run "npm run setup-recorder" once to download the recorder browser, then try again.'
+          : (stderr.trim().split('\n').slice(-3).join(' ') || 'The recording window was closed before any actions were performed.');
+        return reject(new Error(hint));
+      }
+      let content = '';
+      try { content = fs.readFileSync(outFile, 'utf8'); } finally { fs.unlink(outFile, () => {}); }
+      if (!content.trim()) return reject(new Error('No actions were recorded.'));
+      resolve(content);
+    });
+  });
+}
+
+app.post('/recorder/generate', async (req, res) => {
+  try {
+    let url = (req.body.url || '').trim();
+    const project = (req.body.project || '').trim();
+    const environment = (req.body.environment || '').trim();
+    const targetKey = (req.body.target || '').trim();
+    if (!url) return res.status(400).json({ message: 'Please enter a starting URL.' });
+    if (!project) return res.status(400).json({ message: 'Please select a project.' });
+    if (!environment) return res.status(400).json({ message: 'Please select an environment.' });
+    if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+    if (!RECORDER_TARGETS[targetKey]) return res.status(400).json({ message: 'Please choose a target framework.' });
+
+    const content = await recordCodegen(url, targetKey, res);
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const fileName = `Recording_${project}_${environment}_${stamp}.${RECORDER_TARGETS[targetKey].ext}`;
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(content);
+  } catch (err) {
+    console.error(err);
+    if (!res.headersSent) res.status(500).json({ message: err.message || 'Recording failed.' });
   }
 });
 

@@ -100,6 +100,9 @@ when the workbook is opened and as you fill in the Execution Status column.
 
 ---
 
+> 📐 **Architecture & deployment workflow:** see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) —
+> how code flows local → GitHub → Render, the branch strategy, and how to change the deployed branch.
+
 ## ☁️ Deploy to the public internet (Render — free)
 
 > ⚠️ **This app spends your API key.** Always set `APP_PASSWORD` before hosting publicly, or anyone
