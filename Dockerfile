@@ -1,16 +1,21 @@
-# Container image for hosting anywhere that runs Docker (Railway, Fly.io, Cloud Run, etc.)
-FROM node:20-alpine
+FROM node:20
+
 WORKDIR /app
 
-# Install dependencies first (better layer caching)
+# Copy package files
 COPY package*.json ./
-RUN npm install --omit=dev
 
-# App source
+# Install dependencies
+RUN npm install
+
+# Install Playwright browser + Linux dependencies
+RUN npx playwright install --with-deps chromium
+
+# Copy application
 COPY . .
 
-# The app reads PORT from the environment (defaults to 3000)
 ENV PORT=3000
+
 EXPOSE 3000
 
 CMD ["npm", "start"]
